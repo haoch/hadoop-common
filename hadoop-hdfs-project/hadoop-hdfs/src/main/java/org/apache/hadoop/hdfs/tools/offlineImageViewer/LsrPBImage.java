@@ -26,7 +26,8 @@ import java.io.RandomAccessFile;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Comparator;
-import java.util.HashMap;
+import java.util.Map;
+import java.util.List;
 
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
@@ -71,9 +72,10 @@ final class LsrPBImage {
   private final Configuration conf;
   private final PrintWriter out;
   private String[] stringTable;
-  private final HashMap<Long, INodeSection.INode> inodes = Maps.newHashMap();
-  private final HashMap<Long, long[]> dirmap = Maps.newHashMap();
-  private final ArrayList<INodeReferenceSection.INodeReference> refList = Lists.newArrayList();
+  private final Map<Long,String> idname = Maps.newTreeMap();
+  private final Map<Long,String> idparent = Maps.newTreeMap();
+  private final Map<Long, long[]> dirmap = Maps.newTreeMap();
+  private final List<INodeReferenceSection.INodeReference> refList = Lists.newLinkedList();
 
   public LsrPBImage(Configuration conf, PrintWriter out) {
     this.conf = conf;
@@ -131,23 +133,51 @@ final class LsrPBImage {
         }
       }
       list("", INodeId.ROOT_INODE_ID);
+      // Release useless memory
+      idname.clear();
+      dirmap.clear();
+      // Print all inode
+      for (FileSummary.Section s : sections) {
+        if(SectionName.fromString(s.getName()) == SectionName.INODE){
+          fin.getChannel().position(s.getOffset());
+          InputStream is = FSImageUtil.wrapInputStreamForCompression(conf,
+            summary.getCodec(), new BufferedInputStream(new LimitInputStream(
+            fin, s.getLength())));
+          printINode(is);
+        }
+      }
     } finally {
       IOUtils.cleanup(null, fin);
     }
   }
 
+  private void printINode(InputStream in) throws IOException {
+    INodeSection s = INodeSection.parseDelimitedFrom(in);
+    if (LOG.isDebugEnabled()) {
+      LOG.debug("Found " + s.getNumInodes() + " inodes in inode section");
+    }
+    for (int i = 0; i < s.getNumInodes(); ++i) {
+      INode p = INode.parseDelimitedFrom(in);
+      listINode(idparent.get(p.getId()),p);
+      if (LOG.isTraceEnabled()) {
+        LOG.trace("Loaded inode id " + p.getId() + " type " + p.getType()
+          + " name '" + p.getName().toStringUtf8() + "'");
+      }
+    }
+  }
+
   private void list(String parent, long dirId) {
-    INode inode = inodes.get(dirId);
+    String inodeName = idname.get(dirId);
     if (LOG.isTraceEnabled()) {
       LOG.trace("Listing directory id " + dirId + " parent '" + parent
-          + "' (INode is " + inode + ")");
+          + "' (INode is " + inodeName + ")");
     }
-    listINode(parent.isEmpty() ? "/" : parent, inode);
+    idparent.put(dirId,parent.isEmpty() ? "/" : parent);
     long[] children = dirmap.get(dirId);
     if (children == null) {
       return;
     }
-    String newParent = parent + inode.getName().toStringUtf8() + "/";
+    String newParent = parent + inodeName + "/";
     for (long cid : children) {
       list(newParent, cid);
     }
@@ -255,8 +285,8 @@ final class LsrPBImage {
       LOG.debug("Found " + s.getNumInodes() + " inodes in inode section");
     }
     for (int i = 0; i < s.getNumInodes(); ++i) {
-      INodeSection.INode p = INodeSection.INode.parseDelimitedFrom(in);
-      inodes.put(p.getId(), p);
+      INode p = INode.parseDelimitedFrom(in);
+      idname.put(p.getId(), p.getName().toStringUtf8());
       if (LOG.isTraceEnabled()) {
         LOG.trace("Loaded inode id " + p.getId() + " type " + p.getType()
             + " name '" + p.getName().toStringUtf8() + "'");
